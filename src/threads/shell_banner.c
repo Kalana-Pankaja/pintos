@@ -8,7 +8,7 @@ print_shell_banner(void)
 {
     printf("\n");
     printf("************************************\n");
-    printf("*        Welcome to Kalana Shell  *\n");
+    printf("*        Kalana's Shell  *            \n");
     printf("************************************\n");
 
     printf("\nLoading ");
