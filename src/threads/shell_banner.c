@@ -21,5 +21,5 @@ print_shell_banner(void)
     }
 
     printf(" Done!\n\n");
-    printf("Type a command or 'help' to begin.\n\n");
+    printf("Type a command to begin.\n\n");
 }
