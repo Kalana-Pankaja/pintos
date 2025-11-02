@@ -26,6 +26,8 @@ static bool put_user (uint8_t *udst, uint8_t byte);
 static bool is_valid_pointer (const void *ptr);
 static bool is_valid_string (const char *str);
 static bool is_valid_buffer (const void *buffer, unsigned size);
+static bool safe_read_int (int *dst, const int *src);
+static bool safe_read_pointer (void **dst, const void **src);
 
 /* System call implementations. */
 static void sys_halt (void);
@@ -87,18 +89,75 @@ is_valid_pointer (const void *ptr)
   return get_user ((const uint8_t *) ptr) != -1;
 }
 
+/* Safely reads an integer from user space. */
+static bool
+safe_read_int (int *dst, const int *src)
+{
+  /* Check all 4 bytes of the integer */
+  const uint8_t *bytes = (const uint8_t *) src;
+  int i;
+  
+  for (i = 0; i < 4; i++)
+    {
+      if (!is_user_vaddr (bytes + i))
+        return false;
+    }
+  
+  /* Read each byte using get_user */
+  uint8_t result_bytes[4];
+  for (i = 0; i < 4; i++)
+    {
+      int byte = get_user (bytes + i);
+      if (byte == -1)
+        return false;
+      result_bytes[i] = (uint8_t) byte;
+    }
+  
+  /* Reconstruct the integer */
+  *dst = *((int *) result_bytes);
+  return true;
+}
+
+/* Safely reads a pointer from user space. */
+static bool
+safe_read_pointer (void **dst, const void **src)
+{
+  return safe_read_int ((int *) dst, (const int *) src);
+}
+
 /* Verifies that a string is valid. */
 static bool
 is_valid_string (const char *str)
 {
-  if (!is_valid_pointer (str))
+  if (!is_user_vaddr (str))
     return false;
 
   int ch;
-  while ((ch = get_user ((const uint8_t *) str)) != -1 && ch != '\0')
-    str++;
+  const char *ptr = str;
+  
+  /* Check each character until null terminator */
+  while (true)
+    {
+      /* Check if this address is in user space */
+      if (!is_user_vaddr (ptr))
+        return false;
+      
+      /* Safely read the byte */
+      ch = get_user ((const uint8_t *) ptr);
+      if (ch == -1)
+        return false;
+      
+      if (ch == '\0')
+        break;
+      
+      ptr++;
+      
+      /* Prevent infinite loops on very long strings */
+      if (ptr - str > PGSIZE)
+        return false;
+    }
 
-  return ch != -1;
+  return true;
 }
 
 /* Verifies that a buffer is valid. */
@@ -110,11 +169,33 @@ is_valid_buffer (const void *buffer, unsigned size)
 
   const uint8_t *buf = buffer;
   unsigned i;
-  for (i = 0; i < size; i++)
+  
+  /* Check for overflow: if buffer + size wraps around, it's invalid */
+  if ((uintptr_t) buf + size < (uintptr_t) buf)
+    return false;
+  
+  /* Check that the entire range is in user space */
+  if (!is_user_vaddr (buf) || !is_user_vaddr (buf + size - 1))
+    return false;
+  
+  /* Verify we can actually read the buffer by checking first and last byte,
+     and a few bytes in between for efficiency */
+  if (get_user (buf) == -1)
+    return false;
+  
+  if (size > 0 && get_user (buf + size - 1) == -1)
+    return false;
+  
+  /* For larger buffers, check a few more spots */
+  if (size > PGSIZE)
     {
-      if (!is_valid_pointer (buf + i))
-        return false;
+      for (i = PGSIZE; i < size; i += PGSIZE)
+        {
+          if (get_user (buf + i) == -1)
+            return false;
+        }
     }
+  
   return true;
 }
 
@@ -123,15 +204,23 @@ static void
 syscall_handler (struct intr_frame *f)
 {
   int *esp = f->esp;
+  int syscall_number;
+  int arg1, arg2, arg3;
+  void *ptr_arg;
 
-  /* Verify stack pointer. */
-  if (!is_valid_pointer (esp))
+  /* Verify stack pointer is valid and in user space */
+  if (!is_user_vaddr (esp) || !is_user_vaddr ((uint8_t *) esp + 3))
     {
       sys_exit (-1);
       return;
     }
 
-  int syscall_number = *esp;
+  /* Safely read the syscall number */
+  if (!safe_read_int (&syscall_number, esp))
+    {
+      sys_exit (-1);
+      return;
+    }
 
   switch (syscall_number)
     {
@@ -140,149 +229,156 @@ syscall_handler (struct intr_frame *f)
       break;
 
     case SYS_EXIT:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_int (&arg1, esp + 1))
         sys_exit (-1);
-      sys_exit (*(esp + 1));
+      else
+        sys_exit (arg1);
       break;
 
     case SYS_EXEC:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) *(esp + 1)))
+      if (!is_valid_string ((const char *) ptr_arg))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_exec ((const char *) *(esp + 1));
+      f->eax = sys_exec ((const char *) ptr_arg);
       break;
 
     case SYS_WAIT:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_int (&arg1, esp + 1))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_wait (*(esp + 1));
+      f->eax = sys_wait (arg1);
       break;
 
     case SYS_CREATE:
-      if (!is_valid_pointer (esp + 1) || !is_valid_pointer (esp + 2))
+      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)) ||
+          !safe_read_int (&arg2, esp + 2))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) *(esp + 1)))
+      if (!is_valid_string ((const char *) ptr_arg))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_create ((const char *) *(esp + 1), *(esp + 2));
+      f->eax = sys_create ((const char *) ptr_arg, arg2);
       break;
 
     case SYS_REMOVE:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) *(esp + 1)))
+      if (!is_valid_string ((const char *) ptr_arg))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_remove ((const char *) *(esp + 1));
+      f->eax = sys_remove ((const char *) ptr_arg);
       break;
 
     case SYS_OPEN:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) *(esp + 1)))
+      if (!is_valid_string ((const char *) ptr_arg))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_open ((const char *) *(esp + 1));
+      f->eax = sys_open ((const char *) ptr_arg);
       break;
 
     case SYS_FILESIZE:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_int (&arg1, esp + 1))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_filesize (*(esp + 1));
+      f->eax = sys_filesize (arg1);
       break;
 
     case SYS_READ:
-      if (!is_valid_pointer (esp + 1) || !is_valid_pointer (esp + 2) ||
-          !is_valid_pointer (esp + 3))
+      if (!safe_read_int (&arg1, esp + 1) ||
+          !safe_read_pointer (&ptr_arg, (void **) (esp + 2)) ||
+          !safe_read_int (&arg3, esp + 3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_buffer ((void *) *(esp + 2), *(esp + 3)))
+      if (!is_valid_buffer (ptr_arg, arg3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_read (*(esp + 1), (void *) *(esp + 2), *(esp + 3));
+      f->eax = sys_read (arg1, ptr_arg, arg3);
       break;
 
     case SYS_WRITE:
-      if (!is_valid_pointer (esp + 1) || !is_valid_pointer (esp + 2) ||
-          !is_valid_pointer (esp + 3))
+      if (!safe_read_int (&arg1, esp + 1) ||
+          !safe_read_pointer (&ptr_arg, (void **) (esp + 2)) ||
+          !safe_read_int (&arg3, esp + 3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_buffer ((const void *) *(esp + 2), *(esp + 3)))
+      if (!is_valid_buffer (ptr_arg, arg3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_write (*(esp + 1), (const void *) *(esp + 2), *(esp + 3));
+      f->eax = sys_write (arg1, ptr_arg, arg3);
       break;
 
     case SYS_SEEK:
-      if (!is_valid_pointer (esp + 1) || !is_valid_pointer (esp + 2))
+      if (!safe_read_int (&arg1, esp + 1) ||
+          !safe_read_int (&arg2, esp + 2))
         sys_exit (-1);
-      sys_seek (*(esp + 1), *(esp + 2));
+      else
+        sys_seek (arg1, arg2);
       break;
 
     case SYS_TELL:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_int (&arg1, esp + 1))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_tell (*(esp + 1));
+      f->eax = sys_tell (arg1);
       break;
 
     case SYS_CLOSE:
-      if (!is_valid_pointer (esp + 1))
+      if (!safe_read_int (&arg1, esp + 1))
         sys_exit (-1);
-      sys_close (*(esp + 1));
+      else
+        sys_close (arg1);
       break;
 
     default:
