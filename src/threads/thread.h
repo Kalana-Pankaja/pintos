@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -23,6 +24,23 @@ typedef int tid_t;
 #define PRI_MIN 0                       /* Lowest priority. */
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
+
+#ifdef USERPROG
+/* Child process information that persists after child exits.
+   This allows parent to wait() and retrieve exit status even
+   after the child thread has been destroyed. */
+struct child_info
+  {
+    tid_t tid;                          /* Child's thread ID. */
+    int exit_status;                    /* Exit status. */
+    bool waited;                        /* Whether parent has waited. */
+    bool exited;                        /* Whether child has exited. */
+    struct semaphore wait_sema;         /* Semaphore for wait. */
+    struct semaphore load_sema;         /* Semaphore for load. */
+    bool load_success;                  /* Whether load was successful. */
+    struct list_elem elem;              /* List element for parent's children list. */
+  };
+#endif
 
 /* A kernel thread or user process.
 
@@ -96,6 +114,21 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+
+    /* Process management. */
+    struct thread *parent;              /* Parent process. */
+    struct list children;               /* List of child_info structures. */
+
+    /* Process information that persists after thread exits. */
+    struct child_info *proc_info;       /* Process info for parent to access. */
+
+    /* Exit status of this process. */
+    int exit_status;
+
+    /* File descriptors. */
+    struct list file_list;              /* List of open files. */
+    int next_fd;                        /* Next file descriptor number. */
+    struct file *executable;            /* Executable file (deny writes). */
 #endif
 
     /* Owned by thread.c. */
@@ -122,6 +155,7 @@ void thread_unblock (struct thread *);
 struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
+struct thread *thread_by_tid (tid_t tid);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);

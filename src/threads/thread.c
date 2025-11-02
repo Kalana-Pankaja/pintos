@@ -244,9 +244,27 @@ thread_unblock (struct thread *t)
 
 /* Returns the name of the running thread. */
 const char *
-thread_name (void) 
+thread_name (void)
 {
   return thread_current ()->name;
+}
+
+/* Returns the thread with the given TID, or NULL if not found.
+   Searches the all_list for a thread with the given tid. */
+struct thread *
+thread_by_tid (tid_t tid)
+{
+  struct list_elem *e;
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (t->tid == tid)
+        return t;
+    }
+
+  return NULL;
 }
 
 /* Returns the running thread.
@@ -463,6 +481,33 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+
+#ifdef USERPROG
+  /* Initialize process management fields. */
+  /* Get current thread without calling running_thread() to avoid assertion
+     during initial thread setup when status is not yet THREAD_RUNNING. */
+  struct thread *cur;
+  asm ("movl %%esp, %0" : "=g" (cur));
+  cur = pg_round_down (cur);
+
+  /* Set parent only if we're not initializing ourselves (initial thread case)
+     and the current thread is valid. */
+  if (cur != t && cur->magic == THREAD_MAGIC)
+    {
+      t->parent = cur;
+    }
+  else
+    {
+      t->parent = NULL;
+    }
+
+  list_init (&t->children);
+  t->proc_info = NULL;  /* Will be allocated by process_execute() */
+  t->exit_status = -1;
+  list_init (&t->file_list);
+  t->next_fd = 2;  /* 0 and 1 are reserved for stdin/stdout */
+  t->executable = NULL;
+#endif
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

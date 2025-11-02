@@ -22,6 +22,8 @@
 #include "threads/palloc.h"
 #include "threads/pte.h"
 #include "threads/thread.h"
+#include "shell_banner.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #include "userprog/exception.h"
@@ -63,6 +65,7 @@ static void paging_init (void);
 static char **read_command_line (void);
 static char **parse_options (char **argv);
 static void run_actions (char **argv);
+static void run_interactive_shell (void);
 static void usage (void);
 
 #ifdef FILESYS
@@ -133,7 +136,8 @@ pintos_init (void)
     /* Run actions specified on kernel command line. */
     run_actions (argv);
   } else {
-    // TODO: no command line passed to kernel. Run interactively 
+    /* No command line passed to kernel. Run interactively */
+    run_interactive_shell ();
   }
 
   /* Finish up. */
@@ -390,7 +394,88 @@ usage (void)
   shutdown_power_off ();
 }
 
+/* Interactive shell function */
+static void
+run_interactive_shell (void)
+{
+  char buffer[256];
+  int pos;
+  uint8_t c;
+  
+  print_shell_banner();
+  printf("Kalana> ");
+
+  
+  
+  while (true)
+    {
+      pos = 0;
+      
+      
+      while (true)
+        {
+          c = input_getc ();
+          
+          if (c == '\r' || c == '\n')
+            {
+              buffer[pos] = '\0';
+              printf ("\n");
+              break;
+            }
+          else if (c == '\b' || c == 127)
+            {
+              if (pos > 0)
+                {
+                  pos--;
+                  printf ("\b \b");
+                }
+            }
+          else if (c >= ' ' && pos < sizeof buffer - 1)
+            {
+              buffer[pos++] = c;
+              printf ("%c", c);
+            }
+        }
+      
+      /* Process command */
+      if (strcmp (buffer, "whoami") == 0)
+        printf ("Kalana Liyanage- 230461T\n");
+      else if (strcmp (buffer, "shutdown") == 0)
+        {
+          printf ("Shutting down...\n");
+          shutdown_power_off ();
+        }
+      else if (strcmp (buffer, "time") == 0)
+        {
+          int64_t ticks = timer_ticks ();
+          printf ("%lld seconds since boot\n", ticks / TIMER_FREQ);
+        }
+      else if (strcmp (buffer, "ram") == 0)
+        {
+          printf ("Total RAM: %"PRIu32" kB (%"PRIu32" pages)\n",
+                  init_ram_pages * PGSIZE / 1024, init_ram_pages);
+        }
+      else if (strcmp (buffer, "thread") == 0)
+        thread_print_stats ();
+      else if (strcmp (buffer, "priority") == 0)
+        {
+          struct thread *cur = thread_current ();
+          printf ("Current thread priority: %d\n", cur->priority);
+        }
+      else if (strcmp (buffer, "exit") == 0)
+        {
+          printf ("Exiting shell...\n");
+          break;
+        }
+      else if (strlen (buffer) > 0)
+        printf ("Unknown command: %s\n", buffer);
+      
+      printf ("Kalana> ");
+    }
+}
+
 #ifdef FILESYS
+
 /* Figure out what block devices to cast in the various Pintos roles. */
 static void
 locate_block_devices (void)

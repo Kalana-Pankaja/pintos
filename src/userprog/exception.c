@@ -4,6 +4,7 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -147,6 +148,29 @@ page_fault (struct intr_frame *f)
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
+
+  /* Handle page faults in kernel context that come from get_user() or put_user().
+     These functions are designed to safely access user memory and handle faults
+     by returning -1. The inline assembly in these functions stores the address
+     of the recovery point in eax before attempting the memory access.
+
+     We check two conditions:
+     1. The fault is in kernel mode (!user), AND
+     2. Either the fault address is in user space, OR esp is in user space
+        (indicating we were handling a syscall from user space) */
+  if (!user)
+    {
+      void *esp_val = (void *) f->esp;
+      /* If either the fault address or the stack pointer is in user space,
+         this is likely a safe memory access attempt that should use the
+         recovery mechanism. */
+      if (is_user_vaddr (fault_addr) || is_user_vaddr (esp_val))
+        {
+          f->eip = (void (*) (void)) f->eax;
+          f->eax = 0xffffffff;  /* Return -1 */
+          return;
+        }
+    }
 
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
