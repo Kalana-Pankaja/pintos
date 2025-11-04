@@ -26,19 +26,17 @@ typedef int tid_t;
 #define PRI_MAX 63                      /* Highest priority. */
 
 #ifdef USERPROG
-/* Child process information that persists after child exits.
-   This allows parent to wait() and retrieve exit status even
-   after the child thread has been destroyed. */
+// for keeping track of child stuff
 struct child_info
   {
-    tid_t tid;                          /* Child's thread ID. */
-    int exit_status;                    /* Exit status. */
-    bool waited;                        /* Whether parent has waited. */
-    bool exited;                        /* Whether child has exited. */
-    struct semaphore wait_sema;         /* Semaphore for wait. */
-    struct semaphore load_sema;         /* Semaphore for load. */
-    bool load_success;                  /* Whether load was successful. */
-    struct list_elem elem;              /* List element for parent's children list. */
+    tid_t tid;
+    int exit_status;
+    bool waited;
+    bool exited;
+    struct semaphore wait_sema;
+    struct semaphore load_sema;
+    bool load_success;
+    struct list_elem elem;
   };
 #endif
 
@@ -112,23 +110,14 @@ struct thread
     struct list_elem elem;              /* List element. */
 
 #ifdef USERPROG
-    /* Owned by userprog/process.c. */
-    uint32_t *pagedir;                  /* Page directory. */
-
-    /* Process management. */
-    struct thread *parent;              /* Parent process. */
-    struct list children;               /* List of child_info structures. */
-
-    /* Process information that persists after thread exits. */
-    struct child_info *proc_info;       /* Process info for parent to access. */
-
-    /* Exit status of this process. */
+    uint32_t *pagedir;
+    struct thread *parent;
+    struct list children;
+    struct child_info *proc_info;
     int exit_status;
-
-    /* File descriptors. */
-    struct list file_list;              /* List of open files. */
-    int next_fd;                        /* Next file descriptor number. */
-    struct file *executable;            /* Executable file (deny writes). */
+    struct list file_list;
+    int next_fd;
+    struct file *executable;
 #endif
 
     /* Owned by thread.c. */

@@ -68,115 +68,62 @@ exception_print_stats (void)
   printf ("Exception: %lld page faults\n", page_fault_cnt);
 }
 
-/* Handler for an exception (probably) caused by a user process. */
+// kill process on exception
 static void
-kill (struct intr_frame *f) 
+kill (struct intr_frame *f)
 {
-  /* This interrupt is one (probably) caused by a user process.
-     For example, the process might have tried to access unmapped
-     virtual memory (a page fault).  For now, we simply kill the
-     user process.  Later, we'll want to handle page faults in
-     the kernel.  Real Unix-like operating systems pass most
-     exceptions back to the process via signals, but we don't
-     implement them. */
-     
-  /* The interrupt frame's code segment value tells us where the
-     exception originated. */
   switch (f->cs)
     {
     case SEL_UCSEG:
-      /* User's code segment, so it's a user exception, as we
-         expected.  Kill the user process.  */
       printf ("%s: dying due to interrupt %#04x (%s).\n",
               thread_name (), f->vec_no, intr_name (f->vec_no));
       intr_dump_frame (f);
-      thread_exit (); 
+      thread_exit ();
 
     case SEL_KCSEG:
-      /* Kernel's code segment, which indicates a kernel bug.
-         Kernel code shouldn't throw exceptions.  (Page faults
-         may cause kernel exceptions--but they shouldn't arrive
-         here.)  Panic the kernel to make the point.  */
       intr_dump_frame (f);
-      PANIC ("Kernel bug - unexpected interrupt in kernel"); 
+      PANIC ("Kernel bug - unexpected interrupt in kernel");
 
     default:
-      /* Some other code segment?  Shouldn't happen.  Panic the
-         kernel. */
       printf ("Interrupt %#04x (%s) in unknown segment %04x\n",
              f->vec_no, intr_name (f->vec_no), f->cs);
       thread_exit ();
     }
 }
 
-/* Page fault handler.  This is a skeleton that must be filled in
-   to implement virtual memory.  Some solutions to project 2 may
-   also require modifying this code.
-
-   At entry, the address that faulted is in CR2 (Control Register
-   2) and information about the fault, formatted as described in
-   the PF_* macros in exception.h, is in F's error_code member.  The
-   example code here shows how to parse that information.  You
-   can find more information about both of these in the
-   description of "Interrupt 14--Page Fault Exception (#PF)" in
-   [IA32-v3a] section 5.15 "Exception and Interrupt Reference". */
+// page fault handler
 static void
-page_fault (struct intr_frame *f) 
+page_fault (struct intr_frame *f)
 {
-  bool not_present;  /* True: not-present page, false: writing r/o page. */
-  bool write;        /* True: access was write, false: access was read. */
-  bool user;         /* True: access by user, false: access by kernel. */
-  void *fault_addr;  /* Fault address. */
+  bool not_present;
+  bool write;
+  bool user;
+  void *addr;
 
-  /* Obtain faulting address, the virtual address that was
-     accessed to cause the fault.  It may point to code or to
-     data.  It is not necessarily the address of the instruction
-     that caused the fault (that's f->eip).
-     See [IA32-v2a] "MOV--Move to/from Control Registers" and
-     [IA32-v3a] 5.15 "Interrupt 14--Page Fault Exception
-     (#PF)". */
-  asm ("movl %%cr2, %0" : "=r" (fault_addr));
+  asm ("movl %%cr2, %0" : "=r" (addr));
 
-  /* Turn interrupts back on (they were only off so that we could
-     be assured of reading CR2 before it changed). */
   intr_enable ();
 
-  /* Count page faults. */
   page_fault_cnt++;
 
-  /* Determine cause. */
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
-  /* Handle page faults in kernel context that come from get_user() or put_user().
-     These functions are designed to safely access user memory and handle faults
-     by returning -1. The inline assembly in these functions stores the address
-     of the recovery point in eax before attempting the memory access.
-
-     We check two conditions:
-     1. The fault is in kernel mode (!user), AND
-     2. Either the fault address is in user space, OR esp is in user space
-        (indicating we were handling a syscall from user space) */
+  // handle page faults from get_user/put_user
   if (!user)
     {
-      void *esp_val = (void *) f->esp;
-      /* If either the fault address or the stack pointer is in user space,
-         this is likely a safe memory access attempt that should use the
-         recovery mechanism. */
-      if (is_user_vaddr (fault_addr) || is_user_vaddr (esp_val))
+      void *esp = (void *) f->esp;
+      if (is_user_vaddr (addr) || is_user_vaddr (esp))
         {
           f->eip = (void (*) (void)) f->eax;
-          f->eax = 0xffffffff;  /* Return -1 */
+          f->eax = 0xffffffff;
           return;
         }
     }
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
   printf ("Page fault at %p: %s error %s page in %s context.\n",
-          fault_addr,
+          addr,
           not_present ? "not present" : "rights violation",
           write ? "writing" : "reading",
           user ? "user" : "kernel");

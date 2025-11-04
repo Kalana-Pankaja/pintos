@@ -18,175 +18,161 @@
 typedef int pid_t;
 
 static void syscall_handler (struct intr_frame *);
-static struct lock filesys_lock;
+static struct lock file_lock;
 
-/* User memory access functions. */
-static int get_user (const uint8_t *uaddr);
-static bool put_user (uint8_t *udst, uint8_t byte);
-static bool is_valid_pointer (const void *ptr);
-static bool is_valid_string (const char *str);
-static bool is_valid_buffer (const void *buffer, unsigned size);
-static bool safe_read_int (int *dst, const int *src);
-static bool safe_read_pointer (void **dst, const void **src);
+// user memory functions
+static int get_user (const uint8_t *addr);
+static bool put_user (uint8_t *dst, uint8_t byte);
+static bool check_ptr (const void *ptr);
+static bool check_str (const char *str);
+static bool check_buf (const void *buffer, unsigned size);
+static bool read_int (int *dst, const int *src);
+static bool read_ptr (void **dst, const void **src);
 
-/* System call implementations. */
+// syscalls
 static void sys_halt (void);
 static void sys_exit (int status);
-static pid_t sys_exec (const char *cmd_line);
+static pid_t sys_exec (const char *cmd);
 static int sys_wait (pid_t pid);
-static bool sys_create (const char *file, unsigned initial_size);
+static bool sys_create (const char *file, unsigned size);
 static bool sys_remove (const char *file);
 static int sys_open (const char *file);
 static int sys_filesize (int fd);
 static int sys_read (int fd, void *buffer, unsigned size);
 static int sys_write (int fd, const void *buffer, unsigned size);
-static void sys_seek (int fd, unsigned position);
+static void sys_seek (int fd, unsigned pos);
 static unsigned sys_tell (int fd);
 static void sys_close (int fd);
 
-/* File descriptor helpers. */
-static struct file_descriptor *get_file_descriptor (int fd);
+// helper
+static struct file_descriptor *get_fd (int fd);
 
 void
 syscall_init (void)
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
-  lock_init (&filesys_lock);
+  lock_init (&file_lock);
 }
 
-/* Reads a byte at user virtual address UADDR.
-   Returns the byte value if successful, -1 if a segfault occurred. */
+// read byte from user memory
 static int
-get_user (const uint8_t *uaddr)
+get_user (const uint8_t *addr)
 {
-  if (!is_user_vaddr (uaddr))
+  if (!is_user_vaddr (addr))
     return -1;
   int result;
   asm ("movl $1f, %0; movzbl %1, %0; 1:"
-       : "=&a" (result) : "m" (*uaddr));
+       : "=&a" (result) : "m" (*addr));
   return result;
 }
 
-/* Writes BYTE to user address UDST.
-   Returns true if successful, false if a segfault occurred. */
+// write byte to user memory
 static bool
-put_user (uint8_t *udst, uint8_t byte)
+put_user (uint8_t *dst, uint8_t byte)
 {
-  if (!is_user_vaddr (udst))
+  if (!is_user_vaddr (dst))
     return false;
-  int error_code;
+  int error;
   asm ("movl $1f, %0; movb %b2, %1; 1:"
-       : "=&a" (error_code), "=m" (*udst) : "q" (byte));
-  return error_code != -1;
+       : "=&a" (error), "=m" (*dst) : "q" (byte));
+  return error != -1;
 }
 
-/* Verifies that a pointer is valid. */
+// check if pointer is valid
 static bool
-is_valid_pointer (const void *ptr)
+check_ptr (const void *ptr)
 {
   if (ptr == NULL || !is_user_vaddr (ptr))
     return false;
   return get_user ((const uint8_t *) ptr) != -1;
 }
 
-/* Safely reads an integer from user space. */
+// read int from user space
 static bool
-safe_read_int (int *dst, const int *src)
+read_int (int *dst, const int *src)
 {
-  /* Check all 4 bytes of the integer */
   const uint8_t *bytes = (const uint8_t *) src;
   int i;
-  
+
   for (i = 0; i < 4; i++)
     {
       if (!is_user_vaddr (bytes + i))
         return false;
     }
-  
-  /* Read each byte using get_user */
-  uint8_t result_bytes[4];
+
+  uint8_t buf[4];
   for (i = 0; i < 4; i++)
     {
       int byte = get_user (bytes + i);
       if (byte == -1)
         return false;
-      result_bytes[i] = (uint8_t) byte;
+      buf[i] = (uint8_t) byte;
     }
-  
-  /* Reconstruct the integer */
-  *dst = *((int *) result_bytes);
+
+  *dst = *((int *) buf);
   return true;
 }
 
-/* Safely reads a pointer from user space. */
+// read pointer from user space
 static bool
-safe_read_pointer (void **dst, const void **src)
+read_ptr (void **dst, const void **src)
 {
-  return safe_read_int ((int *) dst, (const int *) src);
+  return read_int ((int *) dst, (const int *) src);
 }
 
-/* Verifies that a string is valid. */
+// check if string is valid
 static bool
-is_valid_string (const char *str)
+check_str (const char *str)
 {
   if (!is_user_vaddr (str))
     return false;
 
   int ch;
-  const char *ptr = str;
-  
-  /* Check each character until null terminator */
+  const char *p = str;
+
   while (true)
     {
-      /* Check if this address is in user space */
-      if (!is_user_vaddr (ptr))
+      if (!is_user_vaddr (p))
         return false;
-      
-      /* Safely read the byte */
-      ch = get_user ((const uint8_t *) ptr);
+
+      ch = get_user ((const uint8_t *) p);
       if (ch == -1)
         return false;
-      
+
       if (ch == '\0')
         break;
-      
-      ptr++;
-      
-      /* Prevent infinite loops on very long strings */
-      if (ptr - str > PGSIZE)
+
+      p++;
+
+      if (p - str > PGSIZE)
         return false;
     }
 
   return true;
 }
 
-/* Verifies that a buffer is valid. */
+// check if buffer is valid
 static bool
-is_valid_buffer (const void *buffer, unsigned size)
+check_buf (const void *buffer, unsigned size)
 {
   if (buffer == NULL)
     return false;
 
   const uint8_t *buf = buffer;
   unsigned i;
-  
-  /* Check for overflow: if buffer + size wraps around, it's invalid */
+
   if ((uintptr_t) buf + size < (uintptr_t) buf)
     return false;
-  
-  /* Check that the entire range is in user space */
+
   if (!is_user_vaddr (buf) || !is_user_vaddr (buf + size - 1))
     return false;
-  
-  /* Verify we can actually read the buffer by checking first and last byte,
-     and a few bytes in between for efficiency */
+
   if (get_user (buf) == -1)
     return false;
-  
+
   if (size > 0 && get_user (buf + size - 1) == -1)
     return false;
-  
-  /* For larger buffers, check a few more spots */
+
   if (size > PGSIZE)
     {
       for (i = PGSIZE; i < size; i += PGSIZE)
@@ -195,64 +181,64 @@ is_valid_buffer (const void *buffer, unsigned size)
             return false;
         }
     }
-  
+
   return true;
 }
 
-/* System call handler. */
+// syscall handler
 static void
 syscall_handler (struct intr_frame *f)
 {
   int *esp = f->esp;
-  int syscall_number;
+  int num;
   int arg1, arg2, arg3;
-  void *ptr_arg;
+  void *ptr;
 
-  /* Verify stack pointer is valid and in user space */
+  // check stack pointer
   if (!is_user_vaddr (esp) || !is_user_vaddr ((uint8_t *) esp + 3))
     {
       sys_exit (-1);
       return;
     }
 
-  /* Safely read the syscall number */
-  if (!safe_read_int (&syscall_number, esp))
+  // read syscall number
+  if (!read_int (&num, esp))
     {
       sys_exit (-1);
       return;
     }
 
-  switch (syscall_number)
+  switch (num)
     {
     case SYS_HALT:
       sys_halt ();
       break;
 
     case SYS_EXIT:
-      if (!safe_read_int (&arg1, esp + 1))
+      if (!read_int (&arg1, esp + 1))
         sys_exit (-1);
       else
         sys_exit (arg1);
       break;
 
     case SYS_EXEC:
-      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)))
+      if (!read_ptr (&ptr, (void **) (esp + 1)))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) ptr_arg))
+      if (!check_str ((const char *) ptr))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_exec ((const char *) ptr_arg);
+      f->eax = sys_exec ((const char *) ptr);
       break;
 
     case SYS_WAIT:
-      if (!safe_read_int (&arg1, esp + 1))
+      if (!read_int (&arg1, esp + 1))
         {
           f->eax = -1;
           sys_exit (-1);
@@ -262,56 +248,56 @@ syscall_handler (struct intr_frame *f)
       break;
 
     case SYS_CREATE:
-      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)) ||
-          !safe_read_int (&arg2, esp + 2))
+      if (!read_ptr (&ptr, (void **) (esp + 1)) ||
+          !read_int (&arg2, esp + 2))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) ptr_arg))
+      if (!check_str ((const char *) ptr))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_create ((const char *) ptr_arg, arg2);
+      f->eax = sys_create ((const char *) ptr, arg2);
       break;
 
     case SYS_REMOVE:
-      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)))
+      if (!read_ptr (&ptr, (void **) (esp + 1)))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) ptr_arg))
+      if (!check_str ((const char *) ptr))
         {
           f->eax = 0;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_remove ((const char *) ptr_arg);
+      f->eax = sys_remove ((const char *) ptr);
       break;
 
     case SYS_OPEN:
-      if (!safe_read_pointer (&ptr_arg, (void **) (esp + 1)))
+      if (!read_ptr (&ptr, (void **) (esp + 1)))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_string ((const char *) ptr_arg))
+      if (!check_str ((const char *) ptr))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_open ((const char *) ptr_arg);
+      f->eax = sys_open ((const char *) ptr);
       break;
 
     case SYS_FILESIZE:
-      if (!safe_read_int (&arg1, esp + 1))
+      if (!read_int (&arg1, esp + 1))
         {
           f->eax = -1;
           sys_exit (-1);
@@ -321,51 +307,51 @@ syscall_handler (struct intr_frame *f)
       break;
 
     case SYS_READ:
-      if (!safe_read_int (&arg1, esp + 1) ||
-          !safe_read_pointer (&ptr_arg, (void **) (esp + 2)) ||
-          !safe_read_int (&arg3, esp + 3))
+      if (!read_int (&arg1, esp + 1) ||
+          !read_ptr (&ptr, (void **) (esp + 2)) ||
+          !read_int (&arg3, esp + 3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_buffer (ptr_arg, arg3))
+      if (!check_buf (ptr, arg3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_read (arg1, ptr_arg, arg3);
+      f->eax = sys_read (arg1, ptr, arg3);
       break;
 
     case SYS_WRITE:
-      if (!safe_read_int (&arg1, esp + 1) ||
-          !safe_read_pointer (&ptr_arg, (void **) (esp + 2)) ||
-          !safe_read_int (&arg3, esp + 3))
+      if (!read_int (&arg1, esp + 1) ||
+          !read_ptr (&ptr, (void **) (esp + 2)) ||
+          !read_int (&arg3, esp + 3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      if (!is_valid_buffer (ptr_arg, arg3))
+      if (!check_buf (ptr, arg3))
         {
           f->eax = -1;
           sys_exit (-1);
           break;
         }
-      f->eax = sys_write (arg1, ptr_arg, arg3);
+      f->eax = sys_write (arg1, ptr, arg3);
       break;
 
     case SYS_SEEK:
-      if (!safe_read_int (&arg1, esp + 1) ||
-          !safe_read_int (&arg2, esp + 2))
+      if (!read_int (&arg1, esp + 1) ||
+          !read_int (&arg2, esp + 2))
         sys_exit (-1);
       else
         sys_seek (arg1, arg2);
       break;
 
     case SYS_TELL:
-      if (!safe_read_int (&arg1, esp + 1))
+      if (!read_int (&arg1, esp + 1))
         {
           f->eax = 0;
           sys_exit (-1);
@@ -375,91 +361,84 @@ syscall_handler (struct intr_frame *f)
       break;
 
     case SYS_CLOSE:
-      if (!safe_read_int (&arg1, esp + 1))
+      if (!read_int (&arg1, esp + 1))
         sys_exit (-1);
       else
         sys_close (arg1);
       break;
 
     default:
-      printf ("Unknown system call: %d\n", syscall_number);
+      printf ("Unknown system call: %d\n", num);
       sys_exit (-1);
       break;
     }
 }
 
-/* Halt system call. */
 static void
 sys_halt (void)
 {
   shutdown_power_off ();
 }
 
-/* Exit system call. */
 static void
 sys_exit (int status)
 {
-  struct thread *cur = thread_current ();
-  cur->exit_status = status;
+  struct thread *t = thread_current ();
+  t->exit_status = status;
   thread_exit ();
 }
 
-/* Exec system call. */
 static pid_t
-sys_exec (const char *cmd_line)
+sys_exec (const char *cmd)
 {
-  pid_t pid = process_execute (cmd_line);
+  pid_t pid = process_execute (cmd);
   return pid;
 }
 
-/* Wait system call. */
 static int
 sys_wait (pid_t pid)
 {
   return process_wait (pid);
 }
 
-/* Create system call. */
 static bool
-sys_create (const char *file, unsigned initial_size)
+sys_create (const char *file, unsigned size)
 {
   if (file == NULL || strlen (file) == 0)
     sys_exit (-1);
 
-  lock_acquire (&filesys_lock);
-  bool success = filesys_create (file, initial_size);
-  lock_release (&filesys_lock);
-  return success;
+  lock_acquire (&file_lock);
+  bool ok = filesys_create (file, size);
+  lock_release (&file_lock);
+  return ok;
 }
 
-/* Remove system call. */
 static bool
 sys_remove (const char *file)
 {
   if (file == NULL)
     sys_exit (-1);
 
-  lock_acquire (&filesys_lock);
-  bool success = filesys_remove (file);
-  lock_release (&filesys_lock);
-  return success;
+  lock_acquire (&file_lock);
+  bool ok = filesys_remove (file);
+  lock_release (&file_lock);
+  return ok;
 }
 
-/* Open system call. */
 static int
 sys_open (const char *file)
 {
   if (file == NULL || strlen (file) == 0)
     return -1;
 
-  lock_acquire (&filesys_lock);
+  lock_acquire (&file_lock);
   struct file *f = filesys_open (file);
-  lock_release (&filesys_lock);
+  lock_release (&file_lock);
 
   if (f == NULL)
     return -1;
 
-  struct thread *cur = thread_current ();
+  struct thread *t = thread_current ();
   struct file_descriptor *fd_elem = palloc_get_page (0);
   if (fd_elem == NULL)
     {
@@ -467,51 +446,48 @@ sys_open (const char *file)
       return -1;
     }
 
-  fd_elem->fd = cur->next_fd++;
+  fd_elem->fd = t->next_fd++;
   fd_elem->file = f;
-  list_push_back (&cur->file_list, &fd_elem->elem);
+  list_push_back (&t->file_list, &fd_elem->elem);
 
   return fd_elem->fd;
 }
 
-/* Get file descriptor from list. */
+// get file descriptor
 static struct file_descriptor *
-get_file_descriptor (int fd)
+get_fd (int fd)
 {
-  struct thread *cur = thread_current ();
+  struct thread *t = thread_current ();
   struct list_elem *e;
 
-  for (e = list_begin (&cur->file_list); e != list_end (&cur->file_list);
+  for (e = list_begin (&t->file_list); e != list_end (&t->file_list);
        e = list_next (e))
     {
-      struct file_descriptor *fd_elem = list_entry (e, struct file_descriptor, elem);
-      if (fd_elem->fd == fd)
-        return fd_elem;
+      struct file_descriptor *f = list_entry (e, struct file_descriptor, elem);
+      if (f->fd == fd)
+        return f;
     }
   return NULL;
 }
 
-/* Filesize system call. */
 static int
 sys_filesize (int fd)
 {
-  struct file_descriptor *fd_elem = get_file_descriptor (fd);
-  if (fd_elem == NULL)
+  struct file_descriptor *f = get_fd (fd);
+  if (f == NULL)
     return -1;
 
-  lock_acquire (&filesys_lock);
-  int size = file_length (fd_elem->file);
-  lock_release (&filesys_lock);
+  lock_acquire (&file_lock);
+  int size = file_length (f->file);
+  lock_release (&file_lock);
   return size;
 }
 
-/* Read system call. */
 static int
 sys_read (int fd, void *buffer, unsigned size)
 {
   if (fd == 0)
     {
-      /* Read from keyboard. */
       unsigned i;
       uint8_t *buf = buffer;
       for (i = 0; i < size; i++)
@@ -519,78 +495,73 @@ sys_read (int fd, void *buffer, unsigned size)
       return size;
     }
 
-  struct file_descriptor *fd_elem = get_file_descriptor (fd);
-  if (fd_elem == NULL)
+  struct file_descriptor *f = get_fd (fd);
+  if (f == NULL)
     return -1;
 
-  lock_acquire (&filesys_lock);
-  int bytes_read = file_read (fd_elem->file, buffer, size);
-  lock_release (&filesys_lock);
-  return bytes_read;
+  lock_acquire (&file_lock);
+  int bytes = file_read (f->file, buffer, size);
+  lock_release (&file_lock);
+  return bytes;
 }
 
-/* Write system call. */
 static int
 sys_write (int fd, const void *buffer, unsigned size)
 {
   if (fd == 1)
     {
-      /* Write to console. */
       putbuf (buffer, size);
       return size;
     }
 
-  struct file_descriptor *fd_elem = get_file_descriptor (fd);
-  if (fd_elem == NULL)
+  struct file_descriptor *f = get_fd (fd);
+  if (f == NULL)
     return -1;
 
-  lock_acquire (&filesys_lock);
-  int bytes_written = file_write (fd_elem->file, buffer, size);
-  lock_release (&filesys_lock);
-  return bytes_written;
+  lock_acquire (&file_lock);
+  int bytes = file_write (f->file, buffer, size);
+  lock_release (&file_lock);
+  return bytes;
 }
 
-/* Seek system call. */
 static void
-sys_seek (int fd, unsigned position)
+sys_seek (int fd, unsigned pos)
 {
-  struct file_descriptor *fd_elem = get_file_descriptor (fd);
-  if (fd_elem == NULL)
+  struct file_descriptor *f = get_fd (fd);
+  if (f == NULL)
     return;
 
-  lock_acquire (&filesys_lock);
-  file_seek (fd_elem->file, position);
-  lock_release (&filesys_lock);
+  lock_acquire (&file_lock);
+  file_seek (f->file, pos);
+  lock_release (&file_lock);
 }
 
-/* Tell system call. */
 static unsigned
 sys_tell (int fd)
 {
-  struct file_descriptor *fd_elem = get_file_descriptor (fd);
-  if (fd_elem == NULL)
+  struct file_descriptor *f = get_fd (fd);
+  if (f == NULL)
     return 0;
 
-  lock_acquire (&filesys_lock);
-  unsigned position = file_tell (fd_elem->file);
-  lock_release (&filesys_lock);
-  return position;
+  lock_acquire (&file_lock);
+  unsigned pos = file_tell (f->file);
+  lock_release (&file_lock);
+  return pos;
 }
 
-/* Close system call. */
 static void
 sys_close (int fd)
 {
-  struct file_descriptor *fd_elem = get_file_descriptor (fd);
-  if (fd_elem == NULL)
+  struct file_descriptor *f = get_fd (fd);
+  if (f == NULL)
     return;
 
-  lock_acquire (&filesys_lock);
-  file_close (fd_elem->file);
-  lock_release (&filesys_lock);
+  lock_acquire (&file_lock);
+  file_close (f->file);
+  lock_release (&file_lock);
 
-  list_remove (&fd_elem->elem);
-  palloc_free_page (fd_elem);
+  list_remove (&f->elem);
+  palloc_free_page (f);
 }
 
 /* Public exit function for use by exception handler. */

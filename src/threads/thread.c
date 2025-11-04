@@ -249,8 +249,7 @@ thread_name (void)
   return thread_current ()->name;
 }
 
-/* Returns the thread with the given TID, or NULL if not found.
-   Searches the all_list for a thread with the given tid. */
+// find thread by tid
 struct thread *
 thread_by_tid (tid_t tid)
 {
@@ -483,15 +482,11 @@ init_thread (struct thread *t, const char *name, int priority)
   t->magic = THREAD_MAGIC;
 
 #ifdef USERPROG
-  /* Initialize process management fields. */
-  /* Get current thread without calling running_thread() to avoid assertion
-     during initial thread setup when status is not yet THREAD_RUNNING. */
+  // init process stuff
   struct thread *cur;
   asm ("movl %%esp, %0" : "=g" (cur));
   cur = pg_round_down (cur);
 
-  /* Set parent only if we're not initializing ourselves (initial thread case)
-     and the current thread is valid. */
   if (cur != t && cur->magic == THREAD_MAGIC)
     {
       t->parent = cur;
@@ -502,10 +497,10 @@ init_thread (struct thread *t, const char *name, int priority)
     }
 
   list_init (&t->children);
-  t->proc_info = NULL;  /* Will be allocated by process_execute() */
+  t->proc_info = NULL;
   t->exit_status = -1;
   list_init (&t->file_list);
-  t->next_fd = 2;  /* 0 and 1 are reserved for stdin/stdout */
+  t->next_fd = 2;
   t->executable = NULL;
 #endif
 
